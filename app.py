@@ -1,16 +1,16 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
-import google.generativeai as genai
 import pandas as pd
+import numpy as np
 import sqlite3
-import json
 from datetime import datetime
+import json
 
 # ==========================================
 # 1. KONFIGURASI TAMPILAN HALAMAN
 # ==========================================
-st.set_page_config(page_title="AI Pro Trading Assistant", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Pro Quant Trading System", page_icon="⚡", layout="wide")
 
 st.markdown("""
     <style>
@@ -58,17 +58,15 @@ def update_status(row_id, status):
 init_db()
 
 # ==========================================
-# 3. SIDEBAR: PENGATURAN & API KEY
+# 3. PENGATURAN INSTRUMEN
 # ==========================================
-st.sidebar.title("⚙️ AI Trading Setup")
-api_key = st.sidebar.text_input("Gemini API Key", type="password", placeholder="Masukkan API Key (AIza... atau AQ...)")
-
+st.sidebar.title("⚡ Quant Analyzer")
 kategori = st.sidebar.selectbox("Kategori Market", ["Forex", "Gold / Komoditas", "Crypto", "Saham"])
 daftar_aset = {
     "Forex": {"EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X"},
-    "Gold / Komoditas": {"Emas (Gold)": "GC=F", "Minyak (WTI)": "CL=F"},
+    "Gold / Komoditas": {"Emas (Gold)": "GC=F", "Perak (Silver)": "SI=F", "Minyak WTI": "CL=F"},
     "Crypto": {"Bitcoin": "BTC-USD", "Ethereum": "ETH-USD"},
-    "Saham": {"Apple": "AAPL", "NVIDIA": "NVDA", "Tesla": "TSLA"}
+    "Saham": {"Apple": "AAPL", "Tesla": "TSLA", "NVIDIA": "NVDA"}
 }
 nama_aset = st.sidebar.selectbox("Pilih Instrumen", list(daftar_aset[kategori].keys()))
 ticker = daftar_aset[kategori][nama_aset]
@@ -77,128 +75,141 @@ tf_pilihan = st.sidebar.selectbox("Timeframe Acuan", ["1 Jam (H1)", "4 Jam (H4)"
 tf_config = {"1 Jam (H1)": ("1mo", "1h"), "4 Jam (H4)": ("3mo", "1h"), "1 Hari (D1)": ("1y", "1d")}
 
 # ==========================================
-# 4. AMBIL DATA MARKET REAL-TIME
+# 4. AMBIL DATA & HITUNG ALGORITMA
 # ==========================================
-@st.cache_data(ttl=300)
-def fetch_data(symbol, period, interval):
+@st.cache_data(ttl=60)
+def fetch_market_data(symbol, period, interval):
     df = yf.download(symbol, period=period, interval=interval, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df.dropna()
 
-data = fetch_data(ticker, tf_config[tf_pilihan][0], tf_config[tf_pilihan][1])
+data = fetch_market_data(ticker, tf_config[tf_pilihan][0], tf_config[tf_pilihan][1])
 
 if data.empty:
     st.error("Gagal menarik data pasar. Coba ganti instrumen atau timeframe.")
     st.stop()
 
-# Hitung Indikator (RSI & SMA 20)
+# Perhitungan Indikator Kuantitatif
+data['SMA_20'] = data['Close'].rolling(window=20).mean()
+data['SMA_50'] = data['Close'].rolling(window=50).mean()
+data['ATR'] = data['High'].rolling(14).max() - data['Low'].rolling(14).min()
+
 delta = data['Close'].diff()
 gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
 loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
 rs = gain / loss
 data['RSI'] = 100 - (100 / (1 + rs))
-data['SMA_20'] = data['Close'].rolling(window=20).mean()
 
-harga_sekarang = float(data['Close'].iloc[-1])
-rsi_sekarang = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
-sma_sekarang = float(data['SMA_20'].iloc[-1]) if not pd.isna(data['SMA_20'].iloc[-1]) else harga_sekarang
-
-# ==========================================
-def analisa_ai(api_key, symbol, harga, rsi, sma, tf):
-    genai.configure(api_key=api_key)
-    
-    # KITA PAKSA MENGGUNAKAN 'gemini-pro' KARENA INI MODEL PALING STABIL & PASTI ADA
-    model = genai.GenerativeModel('gemini-pro')
-    
-    prompt = f"""
-    Anda adalah analis trading. Analisa {symbol} di harga {harga}.
-    RSI(14)={rsi:.2f}, SMA(20)={sma:.2f}. Timeframe: {tf}.
-    
-    Tugas:
-    1. Buat rekomendasi BUY, SELL, atau NEUTRAL.
-    2. Tentukan harga Entry, Take Profit (TP), dan Stop Loss (SL).
-    
-    BALAS DENGAN FORMAT JSON VALID SEPERTI INI SAJA:
-    {{
-      "signal": "BUY",
-      "entry_price": {harga},
-      "tp_price": 0.0,
-      "sl_price": 0.0,
-      "risk_percent": "1-2",
-      "est_time": "12-24 Jam",
-      "news": "Ringkasan berita makro",
-      "reason": "Alasan teknikal"
-    }}
-    """
-    
-    try:
-        response = model.generate_content(prompt)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_text)
-    except Exception as e:
-        return {"error": f"Error dari Google: {str(e)}"}
+# Ambil Nilai Terakhir
+harga_now = float(data['Close'].iloc[-1])
+rsi_now = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
+sma20_now = float(data['SMA_20'].iloc[-1])
+sma50_now = float(data['SMA_50'].iloc[-1])
+atr_now = float(data['ATR'].iloc[-1]) if not pd.isna(data['ATR'].iloc[-1]) else harga_now * 0.01
 
 # ==========================================
-# 6. HEADER & DASHBOARD UTAMA
+# 5. ALGORITMA PENGAMBIL KEPUTUSAN (PENGGANTI AI)
 # ==========================================
-st.title(f"📊 Dashboard AI: {nama_aset}")
-c1, c2, c3 = st.columns(3)
-c1.metric("Harga Saat Ini", f"${harga_sekarang:,.4f}" if harga_sekarang < 10 else f"${harga_sekarang:,.2f}")
-c2.metric("Indikator RSI (14)", f"{rsi_sekarang:.1f}")
-c3.metric("Indikator SMA (20)", f"${sma_sekarang:,.2f}")
-
-if st.button("🚀 MULAI ANALISA AI SEKARANG", type="primary", use_container_width=True):
-    if not api_key:
-        st.warning("Silakan masukkan Gemini API Key di menu samping kiri terlebih dahulu!")
+def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
+    # Logika Trend
+    trend_up = harga > sma20 and sma20 > sma50
+    trend_down = harga < sma20 and sma20 < sma50
+    
+    # Penentuan Signal & Target
+    if trend_up and rsi < 70:
+        signal = "BUY"
+        sl = harga - (atr * 1.5)
+        tp = harga + (atr * 3.0)  # Rasio 1:2
+        reason = f"Harga bergerak di atas SMA 20 & 50 menandakan Uptrend yang kuat. RSI ({rsi:.1f}) masih memiliki ruang naik sebelum overbought."
+    elif trend_down and rsi > 30:
+        signal = "SELL"
+        sl = harga + (atr * 1.5)
+        tp = harga - (atr * 3.0)  # Rasio 1:2
+        reason = f"Harga berada di bawah SMA 20 & 50 menandakan Downtrend. RSI ({rsi:.1f}) menunjukkan tekanan jual masih dominan."
     else:
-        with st.spinner("AI sedang membaca berita pasar dan menghitung level teknikal..."):
-            hasil = analisa_ai(api_key, nama_aset, harga_sekarang, rsi_sekarang, sma_sekarang, tf_pilihan)
-            
-            if "error" in hasil:
-                st.error(f"Terjadi kesalahan: {hasil['error']}")
-            else:
-                st.session_state['hasil_ai'] = hasil
-                save_signal(nama_aset, hasil['signal'], hasil['entry_price'], hasil['tp_price'], hasil['sl_price'], tf_pilihan)
-                st.success("Analisa selesai & direkam ke sistem!")
+        signal = "NEUTRAL"
+        sl = harga
+        tp = harga
+        reason = "Market sedang sideway atau konsolidasi. Disarankan wait and see karena tidak ada konfirmasi arah yang kuat dari SMA maupun RSI."
+
+    # Tarik Berita Yahoo Finance secara otomatis
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        news_data = ticker_obj.news[:2]
+        if news_data:
+            news = "\n\n".join([f"- **{n['title']}**: {n.get('publisher', '')}" for n in news_data])
+        else:
+            news = "Tidak ada berita makro terbaru yang signifikan untuk instrumen ini."
+    except:
+        news = "Sedang mengambil data pasar historis. Tidak ada rilis sentimen terbaru."
+
+    return {
+        "signal": signal,
+        "entry_price": harga,
+        "tp_price": tp,
+        "sl_price": sl,
+        "risk_percent": "1.5 - 2",
+        "est_time": "1 - 3 Hari Kedepan",
+        "news": news,
+        "reason": reason
+    }
+
+# ==========================================
+# 6. HEADER & DASHBOARD
+# ==========================================
+st.title(f"📊 Live Market Analysis: {nama_aset}")
+c1, c2, c3 = st.columns(3)
+c1.metric("Harga Live", f"${harga_now:,.4f}" if harga_now < 10 else f"${harga_now:,.2f}")
+c2.metric("RSI (14)", f"{rsi_now:.1f}")
+c3.metric("Volatilitas (ATR)", f"${atr_now:,.4f}" if atr_now < 10 else f"${atr_now:,.2f}")
+
+if st.button("🚀 JALANKAN ANALISA SEKARANG", type="primary", use_container_width=True):
+    with st.spinner("Sistem algoritma sedang mengkalkulasi momentum, volatilitas, dan level kunci..."):
+        hasil = analisa_kuantitatif(harga_now, rsi_now, sma20_now, sma50_now, atr_now)
+        st.session_state['hasil_analisa'] = hasil
+        if hasil['signal'] != "NEUTRAL":
+            save_signal(nama_aset, hasil['signal'], hasil['entry_price'], hasil['tp_price'], hasil['sl_price'], tf_pilihan)
+        st.success("Analisa selesai & direkam!")
 
 # ==========================================
 # 7. TAMPILAN HASIL ANALISA & CHART
 # ==========================================
-if 'hasil_ai' in st.session_state:
-    res = st.session_state['hasil_ai']
+if 'hasil_analisa' in st.session_state:
+    res = st.session_state['hasil_analisa']
     st.divider()
     
-    # 7A. Panel Sinyal
+    # Panel Sinyal
     s1, s2, s3 = st.columns([1, 1, 1])
-    sig = res.get('signal', 'NEUTRAL').upper()
+    sig = res['signal']
     
     with s1:
         if sig == 'BUY': st.markdown("<div class='sig-buy'>🟢 BUY SIGNAL</div>", unsafe_allow_html=True)
         elif sig == 'SELL': st.markdown("<div class='sig-sell'>🔴 SELL SIGNAL</div>", unsafe_allow_html=True)
         else: st.markdown("<div class='sig-neutral'>⚪ NEUTRAL</div>", unsafe_allow_html=True)
         st.write("")
-        st.metric("Estimasi Waktu", res.get('est_time', '-'))
-        st.metric("Saran Risiko Modal", f"{res.get('risk_percent', '1')}%")
+        st.metric("Estimasi Waktu", res['est_time'])
+        st.metric("Saran Risiko Modal", f"{res['risk_percent']}%")
         
     with s2:
-        st.metric("🎯 Titik Entry", f"${res.get('entry_price', 0):,.4f}")
-        st.metric("📈 Take Profit (TP)", f"${res.get('tp_price', 0):,.4f}")
-        st.metric("🛑 Stop Loss (SL)", f"${res.get('sl_price', 0):,.4f}")
+        st.metric("🎯 Titik Entry", f"${res['entry_price']:,.4f}")
+        st.metric("📈 Take Profit (TP)", f"${res['tp_price']:,.4f}" if sig != "NEUTRAL" else "-")
+        st.metric("🛑 Stop Loss (SL)", f"${res['sl_price']:,.4f}" if sig != "NEUTRAL" else "-")
         
     with s3:
-        st.info(f"📰 **Fundamental/Berita:**\n\n{res.get('news', '-')}")
-        st.success(f"💡 **Analisa Teknikal:**\n\n{res.get('reason', '-')}")
+        st.info(f"📰 **Headline Berita Terkait:**\n\n{res['news']}")
+        st.success(f"💡 **Alasan Algoritma:**\n\n{res['reason']}")
 
-    # 7B. Grafik Interaktif
-    st.subheader("📈 Visualisasi Target TP / SL")
+    # Grafik Interaktif
+    st.subheader("📈 Visualisasi Target TP / SL di Market")
     fig = go.Figure(data=[go.Candlestick(
         x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Candle"
     )])
     
-    fig.add_hline(y=res.get('entry_price', 0), line_dash="dash", line_color="blue", annotation_text="Entry")
-    fig.add_hline(y=res.get('tp_price', 0), line_dash="solid", line_color="green", annotation_text="TP")
-    fig.add_hline(y=res.get('sl_price', 0), line_dash="solid", line_color="red", annotation_text="SL")
+    if sig != "NEUTRAL":
+        fig.add_hline(y=res['entry_price'], line_dash="dash", line_color="blue", annotation_text="Entry")
+        fig.add_hline(y=res['tp_price'], line_dash="solid", line_color="green", annotation_text="TP")
+        fig.add_hline(y=res['sl_price'], line_dash="solid", line_color="red", annotation_text="SL")
     
     fig.update_layout(template='plotly_dark', height=500, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=10, b=0))
     st.plotly_chart(fig, use_container_width=True)
@@ -218,7 +229,7 @@ if not df_hist.empty:
     winrate = (win / selesai * 100) if selesai > 0 else 0
     
     w1, w2, w3, w4 = st.columns(4)
-    w1.metric("Total Analisa AI", total)
+    w1.metric("Total Sinyal Terekam", total)
     w2.metric("Target Tercapai (WIN)", win)
     w3.metric("Gagal (LOSS)", loss)
     w4.metric("Akurasi (Win Rate %)", f"{winrate:.1f}%")
@@ -226,7 +237,7 @@ if not df_hist.empty:
     st.markdown("### Histori & Update Status Sinyal")
     for _, row in df_hist.head(10).iterrows(): # Tampilkan 10 terakhir
         with st.expander(f"{row['date']} | {row['symbol']} - {row['signal']} (Status: {row['status']})"):
-            st.write(f"Entry: **{row['entry']}** | TP: **{row['tp']}** | SL: **{row['sl']}**")
+            st.write(f"Entry: **{row['entry']:.4f}** | TP: **{row['tp']:.4f}** | SL: **{row['sl']:.4f}**")
             if row['status'] == 'PENDING':
                 b1, b2 = st.columns(2)
                 if b1.button("✅ Kena TP (WIN)", key=f"w_{row['id']}"):
@@ -236,4 +247,4 @@ if not df_hist.empty:
                     update_status(row['id'], 'LOSS')
                     st.rerun()
 else:
-    st.info("Belum ada histori. Analisa market untuk memulai rekaman data.")
+    st.info("Belum ada histori sinyal. Tekan tombol analisa di atas ketika market sedang trending.")
