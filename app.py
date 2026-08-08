@@ -105,23 +105,21 @@ rsi_sekarang = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) 
 sma_sekarang = float(data['SMA_20'].iloc[-1]) if not pd.isna(data['SMA_20'].iloc[-1]) else harga_sekarang
 
 # ==========================================
-# 5. FUNGSI ANALISA AI (DENGAN FALLBACK)
-# ==========================================
 def analisa_ai(api_key, symbol, harga, rsi, sma, tf):
     genai.configure(api_key=api_key)
     
-    # AI akan mencoba model-model ini secara berurutan agar tahan banting (anti error 404)
-    model_list = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
+    # KITA PAKSA MENGGUNAKAN 'gemini-pro' KARENA INI MODEL PALING STABIL & PASTI ADA
+    model = genai.GenerativeModel('gemini-pro')
     
     prompt = f"""
-    Anda adalah analis trading institusional. Analisa {symbol} di harga {harga}.
-    Indikator: RSI(14)={rsi:.2f}, SMA(20)={sma:.2f}. Timeframe: {tf}.
+    Anda adalah analis trading. Analisa {symbol} di harga {harga}.
+    RSI(14)={rsi:.2f}, SMA(20)={sma:.2f}. Timeframe: {tf}.
     
-    Tugas Anda:
-    1. Buat rekomendasi BUY, SELL, atau NEUTRAL berdasarkan perpaduan teknikal & berita fundamental terbaru.
+    Tugas:
+    1. Buat rekomendasi BUY, SELL, atau NEUTRAL.
     2. Tentukan harga Entry, Take Profit (TP), dan Stop Loss (SL).
     
-    WAJIB BALAS DENGAN FORMAT JSON VALID SEPERTI INI SAJA (TANPA ```json ATAU TEKS LAINNYA):
+    BALAS DENGAN FORMAT JSON VALID SEPERTI INI SAJA:
     {{
       "signal": "BUY",
       "entry_price": {harga},
@@ -129,24 +127,17 @@ def analisa_ai(api_key, symbol, harga, rsi, sma, tf):
       "sl_price": 0.0,
       "risk_percent": "1-2",
       "est_time": "12-24 Jam",
-      "news": "Ringkasan berita makro/fundamental terbaru",
-      "reason": "Alasan teknikal konkrit"
+      "news": "Ringkasan berita makro",
+      "reason": "Alasan teknikal"
     }}
     """
     
-    for m in model_list:
-        try:
-            model = genai.GenerativeModel(m)
-            response = model.generate_content(prompt)
-            # Bersihkan format jika AI masih membandel memberikan markdown
-            clean_text = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_text)
-        except Exception as e:
-            if "404" in str(e):
-                continue # Coba model berikutnya
-            else:
-                return {"error": str(e)}
-    return {"error": "API Key tidak mendukung model AI yang tersedia. Pastikan API key aktif."}
+    try:
+        response = model.generate_content(prompt)
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_text)
+    except Exception as e:
+        return {"error": f"Error dari Google: {str(e)}"}
 
 # ==========================================
 # 6. HEADER & DASHBOARD UTAMA
