@@ -167,7 +167,7 @@ sma_20 = float(data['SMA_20'].iloc[-1]) if not pd.isna(data['SMA_20'].iloc[-1]) 
 # ==========================================
 def analyze_with_gemini(api_key, symbol, price, rsi, sma, timeframe):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
     Bertindaklah sebagai Senior Financial Analyst & Pro Trader.
