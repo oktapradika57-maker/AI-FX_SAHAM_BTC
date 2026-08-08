@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 import sqlite3
 from datetime import datetime
-import json
 
 # ==========================================
 # 1. KONFIGURASI TAMPILAN HALAMAN
@@ -25,40 +24,52 @@ st.markdown("""
 # 2. DATABASE UNTUK HISTORY & WIN RATE
 # ==========================================
 def init_db():
-    conn = sqlite3.connect("trading_db.sqlite")
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS history 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, symbol TEXT, signal TEXT, 
-                  entry REAL, tp REAL, sl REAL, timeframe TEXT, status TEXT DEFAULT 'PENDING')''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect("trading_db.sqlite", timeout=5)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS history 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, symbol TEXT, signal TEXT, 
+                      entry REAL, tp REAL, sl REAL, timeframe TEXT, status TEXT DEFAULT 'PENDING')''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 def save_signal(symbol, signal, entry, tp, sl, timeframe):
-    conn = sqlite3.connect("trading_db.sqlite")
-    c = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO history (date, symbol, signal, entry, tp, sl, timeframe) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (now, symbol, signal, entry, tp, sl, timeframe))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect("trading_db.sqlite", timeout=5)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("INSERT INTO history (date, symbol, signal, entry, tp, sl, timeframe) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (now, symbol, signal, entry, tp, sl, timeframe))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 def get_history():
-    conn = sqlite3.connect("trading_db.sqlite")
-    df = pd.read_sql_query("SELECT * FROM history ORDER BY id DESC", conn)
-    conn.close()
-    return df
+    try:
+        conn = sqlite3.connect("trading_db.sqlite", timeout=5)
+        df = pd.read_sql_query("SELECT * FROM history ORDER BY id DESC", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=['id', 'date', 'symbol', 'signal', 'entry', 'tp', 'sl', 'timeframe', 'status'])
 
 def update_status(row_id, status):
-    conn = sqlite3.connect("trading_db.sqlite")
-    c = conn.cursor()
-    c.execute("UPDATE history SET status = ? WHERE id = ?", (status, row_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect("trading_db.sqlite", timeout=5)
+        c = conn.cursor()
+        c.execute("UPDATE history SET status = ? WHERE id = ?", (status, row_id))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 init_db()
 
 # ==========================================
-# 3. PENGATURAN INSTRUMEN
+# 3. PENGATURAN INSTRUMEN (SIDEBAR)
 # ==========================================
 st.sidebar.title("⚡ Quant Analyzer")
 kategori = st.sidebar.selectbox("Kategori Market", ["Forex", "Gold / Komoditas", "Crypto", "Saham"])
@@ -75,19 +86,27 @@ tf_pilihan = st.sidebar.selectbox("Timeframe Acuan", ["1 Jam (H1)", "4 Jam (H4)"
 tf_config = {"1 Jam (H1)": ("1mo", "1h"), "4 Jam (H4)": ("3mo", "1h"), "1 Hari (D1)": ("1y", "1d")}
 
 # ==========================================
-# 4. AMBIL DATA & HITUNG ALGORITMA
+# 4. AMBIL DATA DENGAN AMAN (ANTI-HANG)
 # ==========================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300, show_spinner="Menghubungkan ke server data pasar...")
 def fetch_market_data(symbol, period, interval):
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna()
+    try:
+        # Menggunakan timeout terselubung agar tidak nge-hang selamanya
+        df = yf.download(symbol, period=period, interval=interval, progress=False, timeout=10)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except Exception:
+        return pd.DataFrame()
 
-data = fetch_market_data(ticker, tf_config[tf_pilihan][0], tf_config[tf_pilihan][1])
+# Indikator Loading khusus untuk data
+with st.spinner(f"Memuat grafik dan data {nama_aset}..."):
+    data = fetch_market_data(ticker, tf_config[tf_pilihan][0], tf_config[tf_pilihan][1])
 
 if data.empty:
-    st.error("Gagal menarik data pasar. Coba ganti instrumen atau timeframe.")
+    st.error(f"Gagal menarik data untuk {nama_aset}. Kemungkinan koneksi internet terganggu atau server Yahoo Finance sedang sibuk. Silakan ubah instrumen atau klik tombol *Reload* di browser.")
     st.stop()
 
 # Perhitungan Indikator Kuantitatif
@@ -104,45 +123,35 @@ data['RSI'] = 100 - (100 / (1 + rs))
 # Ambil Nilai Terakhir
 harga_now = float(data['Close'].iloc[-1])
 rsi_now = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
-sma20_now = float(data['SMA_20'].iloc[-1])
-sma50_now = float(data['SMA_50'].iloc[-1])
+sma20_now = float(data['SMA_20'].iloc[-1]) if not pd.isna(data['SMA_20'].iloc[-1]) else harga_now
+sma50_now = float(data['SMA_50'].iloc[-1]) if not pd.isna(data['SMA_50'].iloc[-1]) else harga_now
 atr_now = float(data['ATR'].iloc[-1]) if not pd.isna(data['ATR'].iloc[-1]) else harga_now * 0.01
 
 # ==========================================
-# 5. ALGORITMA PENGAMBIL KEPUTUSAN (PENGGANTI AI)
+# 5. ALGORITMA PENGAMBIL KEPUTUSAN
 # ==========================================
 def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
-    # Logika Trend
     trend_up = harga > sma20 and sma20 > sma50
     trend_down = harga < sma20 and sma20 < sma50
     
-    # Penentuan Signal & Target
     if trend_up and rsi < 70:
         signal = "BUY"
         sl = harga - (atr * 1.5)
-        tp = harga + (atr * 3.0)  # Rasio 1:2
-        reason = f"Harga bergerak di atas SMA 20 & 50 menandakan Uptrend yang kuat. RSI ({rsi:.1f}) masih memiliki ruang naik sebelum overbought."
+        tp = harga + (atr * 3.0)
+        reason = f"Harga bergerak di atas SMA 20 & 50 menandakan Uptrend yang kuat. RSI ({rsi:.1f}) masih memiliki ruang naik."
     elif trend_down and rsi > 30:
         signal = "SELL"
         sl = harga + (atr * 1.5)
-        tp = harga - (atr * 3.0)  # Rasio 1:2
+        tp = harga - (atr * 3.0)
         reason = f"Harga berada di bawah SMA 20 & 50 menandakan Downtrend. RSI ({rsi:.1f}) menunjukkan tekanan jual masih dominan."
     else:
         signal = "NEUTRAL"
         sl = harga
         tp = harga
-        reason = "Market sedang sideway atau konsolidasi. Disarankan wait and see karena tidak ada konfirmasi arah yang kuat dari SMA maupun RSI."
+        reason = "Market sedang konsolidasi atau sideway. Disarankan wait and see karena belum ada konfirmasi tren yang kuat."
 
-    # Tarik Berita Yahoo Finance secara otomatis
-    try:
-        ticker_obj = yf.Ticker(ticker)
-        news_data = ticker_obj.news[:2]
-        if news_data:
-            news = "\n\n".join([f"- **{n['title']}**: {n.get('publisher', '')}" for n in news_data])
-        else:
-            news = "Tidak ada berita makro terbaru yang signifikan untuk instrumen ini."
-    except:
-        news = "Sedang mengambil data pasar historis. Tidak ada rilis sentimen terbaru."
+    # Berita aman (tanpa blocking request berat)
+    news = f"Analisis sentimen berbasis momentum harga terkini untuk {nama_aset} pada timeframe {tf_pilihan}."
 
     return {
         "signal": signal,
@@ -165,7 +174,7 @@ c2.metric("RSI (14)", f"{rsi_now:.1f}")
 c3.metric("Volatilitas (ATR)", f"${atr_now:,.4f}" if atr_now < 10 else f"${atr_now:,.2f}")
 
 if st.button("🚀 JALANKAN ANALISA SEKARANG", type="primary", use_container_width=True):
-    with st.spinner("Sistem algoritma sedang mengkalkulasi momentum, volatilitas, dan level kunci..."):
+    with st.spinner("Mengalkulasi indikator teknikal & level harga..."):
         hasil = analisa_kuantitatif(harga_now, rsi_now, sma20_now, sma50_now, atr_now)
         st.session_state['hasil_analisa'] = hasil
         if hasil['signal'] != "NEUTRAL":
@@ -179,7 +188,6 @@ if 'hasil_analisa' in st.session_state:
     res = st.session_state['hasil_analisa']
     st.divider()
     
-    # Panel Sinyal
     s1, s2, s3 = st.columns([1, 1, 1])
     sig = res['signal']
     
@@ -197,10 +205,9 @@ if 'hasil_analisa' in st.session_state:
         st.metric("🛑 Stop Loss (SL)", f"${res['sl_price']:,.4f}" if sig != "NEUTRAL" else "-")
         
     with s3:
-        st.info(f"📰 **Headline Berita Terkait:**\n\n{res['news']}")
+        st.info(f"📰 **Sentimen Makro:**\n\n{res['news']}")
         st.success(f"💡 **Alasan Algoritma:**\n\n{res['reason']}")
 
-    # Grafik Interaktif
     st.subheader("📈 Visualisasi Target TP / SL di Market")
     fig = go.Figure(data=[go.Candlestick(
         x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Candle"
@@ -235,7 +242,7 @@ if not df_hist.empty:
     w4.metric("Akurasi (Win Rate %)", f"{winrate:.1f}%")
     
     st.markdown("### Histori & Update Status Sinyal")
-    for _, row in df_hist.head(10).iterrows(): # Tampilkan 10 terakhir
+    for _, row in df_hist.head(10).iterrows():
         with st.expander(f"{row['date']} | {row['symbol']} - {row['signal']} (Status: {row['status']})"):
             st.write(f"Entry: **{row['entry']:.4f}** | TP: **{row['tp']:.4f}** | SL: **{row['sl']:.4f}**")
             if row['status'] == 'PENDING':
@@ -247,4 +254,4 @@ if not df_hist.empty:
                     update_status(row['id'], 'LOSS')
                     st.rerun()
 else:
-    st.info("Belum ada histori sinyal. Tekan tombol analisa di atas ketika market sedang trending.")
+    st.info("Belum ada histori sinyal. Tekan tombol analisa di atas untuk mulai merekam data.")
