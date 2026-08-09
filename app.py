@@ -6,11 +6,11 @@ import yfinance as yf
 from datetime import datetime
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN & PROTEKSI (HIDE MENU/GITHUB)
+# 1. KONFIGURASI HALAMAN & PROTEKSI KODE
 # ==========================================
 st.set_page_config(page_title="Pro Quant Trading System", page_icon="⚡", layout="wide")
 
-# CSS Untuk menyembunyikan tombol edit/deploy tanpa merusak sidebar
+# CSS Untuk menyembunyikan menu Streamlit (Manage App, Github, Footer) dan memastikan sidebar hilang
 hide_st_style = """
     <style>
     /* Sembunyikan menu 'tiga titik' di kanan atas (Manage App & Deploy) */
@@ -30,7 +30,6 @@ hide_st_style = """
     </style>
 """
 st.markdown(hide_st_style, unsafe_allow_html=True)
-
 
 # ==========================================
 # 2. DATABASE AMAN (SQLITE) & AUTO UPDATE WIN/LOSS
@@ -79,14 +78,12 @@ def manual_update_status(row_id, status):
         pass
 
 def auto_update_winloss(df_market, symbol):
-    # Cek histori yang masih PENDING dan cocokkan dengan pergerakan harga terbaru
     try:
         conn = sqlite3.connect("trading_db.sqlite", timeout=3)
         df_pending = pd.read_sql_query(f"SELECT * FROM history WHERE status = 'PENDING' AND symbol = '{symbol}'", conn)
         
         for _, row in df_pending.iterrows():
             entry_date = pd.to_datetime(row['date'])
-            # Hanya ambil data harga SETELAH waktu signal / entry
             df_after_entry = df_market[df_market.index >= entry_date]
             
             if not df_after_entry.empty:
@@ -112,19 +109,30 @@ def auto_update_winloss(df_market, symbol):
 init_db()
 
 # ==========================================
-# 3. SIDEBAR PENGATURAN
+# 3. MENU PENGATURAN DI HALAMAN UTAMA (Tanpa Sidebar)
 # ==========================================
-st.sidebar.title("⚡ Quant Analyzer")
-kategori = st.sidebar.selectbox("Kategori Market", ["Forex", "Gold / Komoditas", "Crypto", "Saham"])
+st.title("⚡ Pro Quant Trading System")
+st.markdown("### ⚙️ Pengaturan Market & Instrumen")
+
+# Membagi menu dalam 3 kolom agar rapi
+col_kat, col_aset, col_tf = st.columns(3)
+
+with col_kat:
+    kategori = st.selectbox("Kategori Market", ["Forex", "Gold / Komoditas", "Crypto", "Saham"])
+
 daftar_aset = {
     "Forex": {"EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X"},
     "Gold / Komoditas": {"Emas (Gold)": "GC=F", "Perak (Silver)": "SI=F", "Minyak WTI": "CL=F"},
     "Crypto": {"Bitcoin": "BTC-USD", "Ethereum": "ETH-USD"},
     "Saham": {"Apple": "AAPL", "Tesla": "TSLA", "NVIDIA": "NVDA"}
 }
-nama_aset = st.sidebar.selectbox("Pilih Instrumen", list(daftar_aset[kategori].keys()))
-ticker = daftar_aset[kategori][nama_aset]
-tf_pilihan = st.sidebar.selectbox("Timeframe Acuan", ["1 Jam (H1)", "4 Jam (H4)", "1 Hari (D1)"], index=1)
+
+with col_aset:
+    nama_aset = st.selectbox("Pilih Instrumen", list(daftar_aset[kategori].keys()))
+    ticker = daftar_aset[kategori][nama_aset]
+
+with col_tf:
+    tf_pilihan = st.selectbox("Timeframe Acuan", ["1 Jam (H1)", "4 Jam (H4)", "1 Hari (D1)"], index=1)
 
 # ==========================================
 # 4. AMBIL DATA BULLETPROOF & NEWS
@@ -140,7 +148,6 @@ def get_market_data(symbol):
     except:
         pass
     
-    # Fallback Data
     np.random.seed(hash(symbol) % 2**32)
     dates = pd.date_range(end=datetime.now(), periods=200, freq='h')
     base_price = 2000 if "Gold" in symbol else (60000 if "Bitcoin" in symbol else 1.1)
@@ -155,12 +162,10 @@ def get_market_data(symbol):
     return df, True
 
 data, is_fallback = get_market_data(ticker)
-
-# Jalankan pengecekan WIN/LOSS otomatis setiap kali data baru ditarik
 auto_update_winloss(data, nama_aset)
 
 if is_fallback:
-    st.sidebar.warning("⚠️ Mode Simulasi Aktif. (Tidak ada koneksi server)")
+    st.warning("⚠️ Mode Simulasi Aktif. (Tidak ada koneksi server)")
 
 data['SMA_20'] = data['Close'].rolling(window=20).mean()
 data['SMA_50'] = data['Close'].rolling(window=50).mean()
@@ -187,7 +192,6 @@ def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
     
     if trend_up and rsi < 70:
         signal = "BUY"
-        # Memisahkan Market Price dengan Ideal Entry (Pullback strategy)
         ideal_entry = sma20 if harga > sma20 + (atr * 0.2) else harga
         sl = ideal_entry - (atr * 1.5)
         tp = ideal_entry + (atr * 3.0)
@@ -229,22 +233,21 @@ def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
     }
 
 # ==========================================
-# 6. TAMPILAN UTAMA & GRAFIK LIVE
+# 6. TAMPILAN DASHBOARD & GRAFIK LIVE
 # ==========================================
-st.title(f"📊 Dashboard Analisis: {nama_aset}")
+st.divider()
+st.subheader(f"📊 Dashboard Analisis: {nama_aset}")
 c1, c2, c3 = st.columns(3)
 c1.metric("Harga Market Saat Ini", f"${harga_now:,.4f}" if harga_now < 10 else f"${harga_now:,.2f}")
 c2.metric("RSI (14)", f"{rsi_now:.1f}")
 c3.metric("Volatilitas (ATR)", f"${atr_now:,.4f}" if atr_now < 10 else f"${atr_now:,.2f}")
 
-# GRAFIK SELALU TAMPIL (Live Chart)
-st.subheader("📈 Live Market Chart")
+st.markdown("### 📈 Live Market Chart")
 import plotly.graph_objects as go
 fig = go.Figure(data=[go.Candlestick(
     x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Candle"
 )])
 
-# Jika user sudah pencet analisa, tambahkan garis TP SL ke chart
 if 'hasil_analisa' in st.session_state:
     res = st.session_state['hasil_analisa']
     if res['signal'] != "NEUTRAL":
@@ -255,7 +258,6 @@ if 'hasil_analisa' in st.session_state:
 fig.update_layout(template='plotly_dark', height=450, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=10, b=0))
 st.plotly_chart(fig, use_container_width=True)
 
-# TOMBOL ANALISA
 if st.button("🚀 JALANKAN ANALISA AI SEKARANG", type="primary", use_container_width=True):
     hasil = analisa_kuantitatif(harga_now, rsi_now, sma20_now, sma50_now, atr_now)
     st.session_state['hasil_analisa'] = hasil
@@ -263,7 +265,6 @@ if st.button("🚀 JALANKAN ANALISA AI SEKARANG", type="primary", use_container_
         save_signal(nama_aset, hasil['signal'], hasil['entry_price'], hasil['tp_price'], hasil['sl_price'], tf_pilihan)
     st.rerun()
 
-# TAMPILKAN HASIL JIKA ADA
 if 'hasil_analisa' in st.session_state:
     res = st.session_state['hasil_analisa']
     st.divider()
@@ -293,14 +294,13 @@ if 'hasil_analisa' in st.session_state:
 st.divider()
 st.subheader("📰 Market News & Sentimen AI (Faktor Fundamental)")
 try:
-    news_data = yf.Ticker(ticker).news[:4] # Ambil 4 berita terbaru
+    news_data = yf.Ticker(ticker).news[:4]
     if len(news_data) > 0:
         for n in news_data:
             title = n.get('title', 'No Title')
             link = n.get('link', '#')
             publisher = n.get('publisher', 'Unknown')
             
-            # Simple AI Sentiment based on keywords
             title_lower = title.lower()
             bullish_kw = ['surge', 'jump', 'gain', 'high', 'up', 'bull', 'growth', 'soar', 'positive']
             bearish_kw = ['drop', 'fall', 'loss', 'low', 'down', 'bear', 'crash', 'plunge', 'negative']
