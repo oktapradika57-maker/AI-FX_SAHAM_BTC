@@ -10,14 +10,19 @@ from datetime import datetime
 # ==========================================
 st.set_page_config(page_title="Pro Quant Trading System", page_icon="⚡", layout="wide")
 
-# CSS Untuk menyembunyikan menu Streamlit (Manage App, Github, Footer) agar tidak bisa di-copy
+# CSS Untuk menyembunyikan tombol edit/deploy tanpa merusak sidebar
 hide_st_style = """
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .viewerBadge_container__1QSob {display: none;}
+    /* Sembunyikan menu 'tiga titik' di kanan atas (Manage App & Deploy) */
+    [data-testid="stToolbar"] {visibility: hidden !important;}
     
+    /* Sembunyikan footer bawaan Streamlit */
+    footer {visibility: hidden !important;}
+    
+    /* Sembunyikan badge GitHub jika masih muncul */
+    .viewerBadge_container__1QSob {display: none !important;}
+    
+    /* CSS Tampilan Metrik & Sinyal */
     .stMetric { background-color: #1e222d; padding: 15px; border-radius: 8px; border: 1px solid #2a2e39; }
     .sig-buy { background-color: #064e3b; color: #34d399; padding: 15px; border-radius: 8px; font-size: 24px; font-weight: bold; text-align: center; border: 1px solid #059669; }
     .sig-sell { background-color: #7f1d1d; color: #f87171; padding: 15px; border-radius: 8px; font-size: 24px; font-weight: bold; text-align: center; border: 1px solid #dc2626; }
@@ -25,6 +30,7 @@ hide_st_style = """
     </style>
 """
 st.markdown(hide_st_style, unsafe_allow_html=True)
+
 
 # ==========================================
 # 2. DATABASE AMAN (SQLITE) & AUTO UPDATE WIN/LOSS
