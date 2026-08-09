@@ -2,24 +2,32 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import sqlite3
+import yfinance as yf
 from datetime import datetime
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN
+# 1. KONFIGURASI HALAMAN & PROTEKSI (HIDE MENU/GITHUB)
 # ==========================================
 st.set_page_config(page_title="Pro Quant Trading System", page_icon="⚡", layout="wide")
 
-st.markdown("""
+# CSS Untuk menyembunyikan menu Streamlit (Manage App, Github, Footer) agar tidak bisa di-copy
+hide_st_style = """
     <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .viewerBadge_container__1QSob {display: none;}
+    
     .stMetric { background-color: #1e222d; padding: 15px; border-radius: 8px; border: 1px solid #2a2e39; }
     .sig-buy { background-color: #064e3b; color: #34d399; padding: 15px; border-radius: 8px; font-size: 24px; font-weight: bold; text-align: center; border: 1px solid #059669; }
     .sig-sell { background-color: #7f1d1d; color: #f87171; padding: 15px; border-radius: 8px; font-size: 24px; font-weight: bold; text-align: center; border: 1px solid #dc2626; }
     .sig-neutral { background-color: #374151; color: #d1d5db; padding: 15px; border-radius: 8px; font-size: 24px; font-weight: bold; text-align: center; border: 1px solid #6b7280; }
     </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(hide_st_style, unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATABASE AMAN (SQLITE)
+# 2. DATABASE AMAN (SQLITE) & AUTO UPDATE WIN/LOSS
 # ==========================================
 def init_db():
     try:
@@ -54,7 +62,7 @@ def get_history():
     except:
         return pd.DataFrame(columns=['id', 'date', 'symbol', 'signal', 'entry', 'tp', 'sl', 'timeframe', 'status'])
 
-def update_status(row_id, status):
+def manual_update_status(row_id, status):
     try:
         conn = sqlite3.connect("trading_db.sqlite", timeout=3)
         c = conn.cursor()
@@ -62,6 +70,37 @@ def update_status(row_id, status):
         conn.commit()
         conn.close()
     except:
+        pass
+
+def auto_update_winloss(df_market, symbol):
+    # Cek histori yang masih PENDING dan cocokkan dengan pergerakan harga terbaru
+    try:
+        conn = sqlite3.connect("trading_db.sqlite", timeout=3)
+        df_pending = pd.read_sql_query(f"SELECT * FROM history WHERE status = 'PENDING' AND symbol = '{symbol}'", conn)
+        
+        for _, row in df_pending.iterrows():
+            entry_date = pd.to_datetime(row['date'])
+            # Hanya ambil data harga SETELAH waktu signal / entry
+            df_after_entry = df_market[df_market.index >= entry_date]
+            
+            if not df_after_entry.empty:
+                high_tertinggi = df_after_entry['High'].max()
+                low_terendah = df_after_entry['Low'].min()
+                
+                new_status = 'PENDING'
+                if row['signal'] == 'BUY':
+                    if high_tertinggi >= row['tp']: new_status = 'WIN'
+                    elif low_terendah <= row['sl']: new_status = 'LOSS'
+                elif row['signal'] == 'SELL':
+                    if low_terendah <= row['tp']: new_status = 'WIN'
+                    elif high_tertinggi >= row['sl']: new_status = 'LOSS'
+                
+                if new_status != 'PENDING':
+                    c = conn.cursor()
+                    c.execute("UPDATE history SET status = ? WHERE id = ?", (new_status, row['id']))
+        conn.commit()
+        conn.close()
+    except Exception as e:
         pass
 
 init_db()
@@ -79,17 +118,14 @@ daftar_aset = {
 }
 nama_aset = st.sidebar.selectbox("Pilih Instrumen", list(daftar_aset[kategori].keys()))
 ticker = daftar_aset[kategori][nama_aset]
-
 tf_pilihan = st.sidebar.selectbox("Timeframe Acuan", ["1 Jam (H1)", "4 Jam (H4)", "1 Hari (D1)"], index=1)
 
 # ==========================================
-# 4. AMBIL DATA BULLETPROOF (ANTI-HANG)
+# 4. AMBIL DATA BULLETPROOF & NEWS
 # ==========================================
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=60)
 def get_market_data(symbol):
-    # Coba tarik dari Yahoo Finance dengan proteksi maksimal
     try:
-        import yfinance as yf
         df = yf.download(symbol, period="3mo", interval="1h", progress=False)
         if df is not None and not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
@@ -98,7 +134,7 @@ def get_market_data(symbol):
     except:
         pass
     
-    # FALLBACK OTOMATIS: Jika internet/yahoo nge-lag, buat data dummy instan agar app TIDAK HANG
+    # Fallback Data
     np.random.seed(hash(symbol) % 2**32)
     dates = pd.date_range(end=datetime.now(), periods=200, freq='h')
     base_price = 2000 if "Gold" in symbol else (60000 if "Bitcoin" in symbol else 1.1)
@@ -112,13 +148,14 @@ def get_market_data(symbol):
     }, index=dates)
     return df, True
 
-# Eksekusi instan tanpa loading muter-muter
 data, is_fallback = get_market_data(ticker)
 
-if is_fallback:
-    st.sidebar.warning("⚠️ Mode Offline/Simulasi Aktif (Koneksi ke server pasar dibatasi, menggunakan data kalkulasi instan).")
+# Jalankan pengecekan WIN/LOSS otomatis setiap kali data baru ditarik
+auto_update_winloss(data, nama_aset)
 
-# Kalkulasi Indikator
+if is_fallback:
+    st.sidebar.warning("⚠️ Mode Simulasi Aktif. (Tidak ada koneksi server)")
+
 data['SMA_20'] = data['Close'].rolling(window=20).mean()
 data['SMA_50'] = data['Close'].rolling(window=50).mean()
 data['ATR'] = data['High'].rolling(14).max() - data['Low'].rolling(14).min()
@@ -136,7 +173,7 @@ sma50_now = float(data['SMA_50'].iloc[-1]) if not pd.isna(data['SMA_50'].iloc[-1
 atr_now = float(data['ATR'].iloc[-1]) if not pd.isna(data['ATR'].iloc[-1]) else harga_now * 0.01
 
 # ==========================================
-# 5. LOGIKA ANALISA
+# 5. LOGIKA ANALISA & OPTIMAL ENTRY
 # ==========================================
 def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
     trend_up = harga > sma20 and sma20 > sma50
@@ -144,23 +181,40 @@ def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
     
     if trend_up and rsi < 70:
         signal = "BUY"
-        sl = harga - (atr * 1.5)
-        tp = harga + (atr * 3.0)
-        reason = f"Uptrend terdeteksi (Harga > SMA 20/50). RSI ({rsi:.1f}) menunjukkan momentum positif."
+        # Memisahkan Market Price dengan Ideal Entry (Pullback strategy)
+        ideal_entry = sma20 if harga > sma20 + (atr * 0.2) else harga
+        sl = ideal_entry - (atr * 1.5)
+        tp = ideal_entry + (atr * 3.0)
+        reason = (f"🚀 **Sinyal BUY Tervalidasi**\n\n"
+                  f"- **Tren & Arah:** Bullish kuat (Harga memotong ke atas SMA20 & SMA50).\n"
+                  f"- **Momentum:** RSI di level {rsi:.1f} (Belum overbought, ruang naik terbuka).\n"
+                  f"- **Strategi Entry (Pips Maksimal):** Harga pasar saat ini **{harga:.4f}**. "
+                  f"Daripada Hajar Kanan, direkomendasikan antri *Buy Limit* di area **{ideal_entry:.4f}** "
+                  f"sebagai pantulan Support dinamis agar target Profit lebih lebar.")
     elif trend_down and rsi > 30:
         signal = "SELL"
-        sl = harga + (atr * 1.5)
-        tp = harga - (atr * 3.0)
-        reason = f"Downtrend terdeteksi (Harga < SMA 20/50). RSI ({rsi:.1f}) menunjukkan tekanan jual."
+        ideal_entry = sma20 if harga < sma20 - (atr * 0.2) else harga
+        sl = ideal_entry + (atr * 1.5)
+        tp = ideal_entry - (atr * 3.0)
+        reason = (f"📉 **Sinyal SELL Tervalidasi**\n\n"
+                  f"- **Tren & Arah:** Bearish (Harga tertahan di bawah SMA20 & SMA50).\n"
+                  f"- **Momentum:** RSI di level {rsi:.1f} (Masih ada tekanan seller).\n"
+                  f"- **Strategi Entry (Pips Maksimal):** Harga pasar saat ini **{harga:.4f}**. "
+                  f"Direkomendasikan *Sell Limit* di area pullback **{ideal_entry:.4f}** "
+                  f"untuk menjaga Risk:Reward rasio tetap 1:2.")
     else:
         signal = "NEUTRAL"
+        ideal_entry = harga
         sl = harga
         tp = harga
-        reason = "Market konsolidasi / sideway. Disarankan wait and see."
+        reason = ("⚖️ **Market Konsolidasi / Wait & See**\n\n"
+                  "Pergerakan harga saat ini tidak memiliki tren yang jelas atau terjepit di antara garis support dan resisten. "
+                  "Sangat berisiko untuk entry karena rawan terkena *whipsaw* (sinyal palsu).")
 
     return {
         "signal": signal,
-        "entry_price": harga,
+        "market_price": harga,
+        "entry_price": ideal_entry,
         "tp_price": tp,
         "sl_price": sl,
         "risk_percent": "1.5 - 2",
@@ -169,29 +223,46 @@ def analisa_kuantitatif(harga, rsi, sma20, sma50, atr):
     }
 
 # ==========================================
-# 6. TAMPILAN UTAMA
+# 6. TAMPILAN UTAMA & GRAFIK LIVE
 # ==========================================
 st.title(f"📊 Dashboard Analisis: {nama_aset}")
 c1, c2, c3 = st.columns(3)
-c1.metric("Harga Acuan", f"${harga_now:,.4f}" if harga_now < 10 else f"${harga_now:,.2f}")
+c1.metric("Harga Market Saat Ini", f"${harga_now:,.4f}" if harga_now < 10 else f"${harga_now:,.2f}")
 c2.metric("RSI (14)", f"{rsi_now:.1f}")
 c3.metric("Volatilitas (ATR)", f"${atr_now:,.4f}" if atr_now < 10 else f"${atr_now:,.2f}")
 
-if st.button("🚀 JALANKAN ANALISA SEKARANG", type="primary", use_container_width=True):
+# GRAFIK SELALU TAMPIL (Live Chart)
+st.subheader("📈 Live Market Chart")
+import plotly.graph_objects as go
+fig = go.Figure(data=[go.Candlestick(
+    x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Candle"
+)])
+
+# Jika user sudah pencet analisa, tambahkan garis TP SL ke chart
+if 'hasil_analisa' in st.session_state:
+    res = st.session_state['hasil_analisa']
+    if res['signal'] != "NEUTRAL":
+        fig.add_hline(y=res['entry_price'], line_dash="dash", line_color="#3b82f6", annotation_text="Ideal Entry")
+        fig.add_hline(y=res['tp_price'], line_dash="solid", line_color="#10b981", annotation_text="Take Profit")
+        fig.add_hline(y=res['sl_price'], line_dash="solid", line_color="#ef4444", annotation_text="Stop Loss")
+
+fig.update_layout(template='plotly_dark', height=450, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=10, b=0))
+st.plotly_chart(fig, use_container_width=True)
+
+# TOMBOL ANALISA
+if st.button("🚀 JALANKAN ANALISA AI SEKARANG", type="primary", use_container_width=True):
     hasil = analisa_kuantitatif(harga_now, rsi_now, sma20_now, sma50_now, atr_now)
     st.session_state['hasil_analisa'] = hasil
     if hasil['signal'] != "NEUTRAL":
         save_signal(nama_aset, hasil['signal'], hasil['entry_price'], hasil['tp_price'], hasil['sl_price'], tf_pilihan)
-    st.success("Analisa berhasil diproses!")
+    st.rerun()
 
-# ==========================================
-# 7. HASIL & GRAFIK (PLOTLY)
-# ==========================================
+# TAMPILKAN HASIL JIKA ADA
 if 'hasil_analisa' in st.session_state:
     res = st.session_state['hasil_analisa']
     st.divider()
     
-    s1, s2, s3 = st.columns([1, 1, 1])
+    s1, s2, s3 = st.columns([1, 1, 1.5])
     sig = res['signal']
     
     with s1:
@@ -203,33 +274,49 @@ if 'hasil_analisa' in st.session_state:
         st.metric("Risiko Kapital", f"{res['risk_percent']}%")
         
     with s2:
-        st.metric("🎯 Titik Entry", f"${res['entry_price']:,.4f}")
+        st.metric("🎯 Posisi Entry Ideal", f"${res['entry_price']:,.4f}", help="Antri di harga ini untuk pips maksimal")
         st.metric("📈 Take Profit (TP)", f"${res['tp_price']:,.4f}" if sig != "NEUTRAL" else "-")
         st.metric("🛑 Stop Loss (SL)", f"${res['sl_price']:,.4f}" if sig != "NEUTRAL" else "-")
         
     with s3:
-        st.success(f"💡 **Analisis Algoritma:**\n\n{res['reason']}")
-
-    st.subheader("📈 Grafik Pergerakan & Level TP/SL")
-    
-    import plotly.graph_objects as go
-    fig = go.Figure(data=[go.Candlestick(
-        x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Candle"
-    )])
-    
-    if sig != "NEUTRAL":
-        fig.add_hline(y=res['entry_price'], line_dash="dash", line_color="blue", annotation_text="Entry")
-        fig.add_hline(y=res['tp_price'], line_dash="solid", line_color="green", annotation_text="TP")
-        fig.add_hline(y=res['sl_price'], line_dash="solid", line_color="red", annotation_text="SL")
-    
-    fig.update_layout(template='plotly_dark', height=450, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=10, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+        st.info(res['reason'])
 
 # ==========================================
-# 8. WIN RATE & HISTORY
+# 7. BERITA (NEWS) & SENTIMEN PENGARUH HARGA
 # ==========================================
 st.divider()
-st.subheader("🏆 Jurnal Trading & Win Rate Tracker")
+st.subheader("📰 Market News & Sentimen AI (Faktor Fundamental)")
+try:
+    news_data = yf.Ticker(ticker).news[:4] # Ambil 4 berita terbaru
+    if len(news_data) > 0:
+        for n in news_data:
+            title = n.get('title', 'No Title')
+            link = n.get('link', '#')
+            publisher = n.get('publisher', 'Unknown')
+            
+            # Simple AI Sentiment based on keywords
+            title_lower = title.lower()
+            bullish_kw = ['surge', 'jump', 'gain', 'high', 'up', 'bull', 'growth', 'soar', 'positive']
+            bearish_kw = ['drop', 'fall', 'loss', 'low', 'down', 'bear', 'crash', 'plunge', 'negative']
+            
+            sentimen = "⚪ Netral (Tidak Ada Dampak Kuat)"
+            if any(word in title_lower for word in bullish_kw): 
+                sentimen = "🟢 Positif (Potensi Mendorong Harga Naik)"
+            elif any(word in title_lower for word in bearish_kw): 
+                sentimen = "🔴 Negatif (Potensi Mendorong Harga Turun)"
+                
+            st.markdown(f"**[{title}]({link})** — *{publisher}*")
+            st.caption(f"🤖 **Dampak Pasar:** {sentimen}")
+    else:
+        st.write("Tidak ada berita signifikan hari ini.")
+except Exception as e:
+    st.write("Sedang tidak dapat memuat berita untuk aset ini.")
+
+# ==========================================
+# 8. WIN RATE & HISTORY (AUTO & MANUAL)
+# ==========================================
+st.divider()
+st.subheader("🏆 Jurnal Trading & Win Rate Tracker (Otomatis)")
 
 df_hist = get_history()
 if not df_hist.empty:
@@ -240,21 +327,23 @@ if not df_hist.empty:
     winrate = (win / selesai * 100) if selesai > 0 else 0
     
     w1, w2, w3, w4 = st.columns(4)
-    w1.metric("Total Sinyal", total)
-    w2.metric("WIN", win)
-    w3.metric("LOSS", loss)
-    w4.metric("Win Rate %", f"{winrate:.1f}%")
+    w1.metric("Total Sinyal Plan", total)
+    w2.metric("🎯 Kena TP (WIN)", win)
+    w3.metric("🛑 Kena SL (LOSS)", loss)
+    w4.metric("🏆 Akurasi Win Rate", f"{winrate:.1f}%")
+    
+    st.write("*Catatan: Status berubah otomatis menjadi WIN/LOSS jika harga market menyentuh TP/SL setelah sinyal dikeluarkan.*")
     
     for _, row in df_hist.head(10).iterrows():
         with st.expander(f"{row['date']} | {row['symbol']} - {row['signal']} (Status: {row['status']})"):
-            st.write(f"Entry: {row['entry']:.4f} | TP: {row['tp']:.4f} | SL: {row['sl']:.4f}")
+            st.write(f"Harga Entry Plan: {row['entry']:.4f} | TP: {row['tp']:.4f} | SL: {row['sl']:.4f}")
             if row['status'] == 'PENDING':
                 b1, b2 = st.columns(2)
-                if b1.button("✅ WIN", key=f"w_{row['id']}"):
-                    update_status(row['id'], 'WIN')
+                if b1.button("✅ Paksa Set WIN", key=f"w_{row['id']}"):
+                    manual_update_status(row['id'], 'WIN')
                     st.rerun()
-                if b2.button("❌ LOSS", key=f"l_{row['id']}"):
-                    update_status(row['id'], 'LOSS')
+                if b2.button("❌ Paksa Set LOSS", key=f"l_{row['id']}"):
+                    manual_update_status(row['id'], 'LOSS')
                     st.rerun()
 else:
     st.info("Belum ada histori sinyal.")
